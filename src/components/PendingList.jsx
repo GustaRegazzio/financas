@@ -59,9 +59,28 @@ export default function PendingList({ userId }) {
     setLoading(false);
   }, []);
 
+  /* Reidrata as pilhas do banco: undo/redo sobrevive a recarregar a página */
+  const hydrateStacks = useCallback(async () => {
+    const { data } = await supabase
+      .from("action_history")
+      .select("*")
+      .in("action", ["categorize", "bulk_categorize"])
+      .order("created_at", { ascending: true })
+      .limit(50);
+    if (!data) return;
+    const toEntry = (h) => ({
+      historyId: h.id,
+      prev: h.prev_state,
+      next: h.next_state
+    });
+    setUndoStack(data.filter((h) => !h.undone).map(toEntry));
+    setRedoStack(data.filter((h) => h.undone).reverse().map(toEntry));
+  }, []);
+
   useEffect(() => {
     load();
-  }, [load]);
+    hydrateStacks();
+  }, [load, hydrateStacks]);
 
   /* ---------- Aprovação (individual e lote) ---------- */
   const approve = useCallback(
@@ -147,7 +166,10 @@ export default function PendingList({ userId }) {
         }
       }
 
-      setUndoStack((s) => [...s, { historyId: hist?.id, items: affected }]);
+      setUndoStack((s) => [
+        ...s,
+        { historyId: hist?.id, prev: prevState, next: nextState }
+      ]);
       setRedoStack([]);
       setPending((p) => p.filter((t) => !ids.includes(t.id)));
       setSelected(new Set());
@@ -166,10 +188,10 @@ export default function PendingList({ userId }) {
   const undo = useCallback(async () => {
     const last = undoStack[undoStack.length - 1];
     if (!last) return;
-    for (const t of last.items) {
+    for (const t of last.prev) {
       await supabase
         .from("transactions")
-        .update({ status: "pending", category_id: t.category_id })
+        .update({ status: t.status, category_id: t.category_id })
         .eq("id", t.id);
     }
     if (last.historyId) {
@@ -187,13 +209,10 @@ export default function PendingList({ userId }) {
   const redo = useCallback(async () => {
     const last = redoStack[redoStack.length - 1];
     if (!last) return;
-    for (const t of last.items) {
+    for (const t of last.next) {
       await supabase
         .from("transactions")
-        .update({
-          status: "confirmed",
-          category_id: t.suggested_category_id ?? t.category_id
-        })
+        .update({ status: t.status, category_id: t.category_id })
         .eq("id", t.id);
     }
     if (last.historyId) {
