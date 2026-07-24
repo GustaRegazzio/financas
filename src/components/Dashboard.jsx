@@ -14,24 +14,24 @@ import { COLORS, brl } from "../lib/theme";
 export default function Dashboard({ userId }) {
   const [balance, setBalance] = useState(null);
   const [freeMoney, setFreeMoney] = useState(null);
-  const [father, setFather] = useState(null);
+  const [receivables, setReceivables] = useState([]);
   const [goals, setGoals] = useState([]);
   const [limits, setLimits] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState(false);
+  const [copiedId, setCopiedId] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     const [b, f, fa, g, l] = await Promise.all([
       supabase.from("v_total_balance").select("*").maybeSingle(),
       supabase.from("v_free_money_this_month").select("*").maybeSingle(),
-      supabase.from("v_father_invoice_current").select("*").maybeSingle(),
+      supabase.from("v_receivables_by_person").select("*"),
       supabase.from("goals").select("*").order("due_date"),
       supabase.from("v_attention_limits").select("*")
     ]);
     setBalance(b.data?.total_balance ?? 0);
     setFreeMoney(f.data?.free_money ?? 0);
-    setFather(fa.data ?? null);
+    setReceivables(fa.data ?? []);
     setGoals(g.data ?? []);
     setLimits((l.data ?? []).filter((x) => x.monthly_limit != null));
     setLoading(false);
@@ -41,27 +41,23 @@ export default function Dashboard({ userId }) {
     load();
   }, [load]);
 
-  /* Export formato WhatsApp: resumo limpo das despesas do mês */
-  const copyFatherSummary = async () => {
-    if (!father?.items) return;
-    const monthName = new Date().toLocaleDateString("pt-BR", {
-      month: "long",
-      year: "numeric"
-    });
-    const lines = father.items.map((i) => {
+  /* Export formato WhatsApp: resumo do que a pessoa deve */
+  const copySummary = async (r) => {
+    const lines = (r.items ?? []).map((i) => {
       const [, m, d] = i.date.split("-");
-      return `${d}/${m} — ${i.description}: ${brl(Math.abs(i.amount))}`;
+      const label = i.note || i.description;
+      return `${d}/${m} — ${label}: ${brl(Math.abs(i.amount))}`;
     });
     const text = [
-      `*Fatura ${monthName}*`,
+      `*Gastos — ${r.person_name}*`,
       "",
       ...lines,
       "",
-      `*Total: ${brl(father.father_total)}*`
+      `*Total: ${brl(r.total_due)}*`
     ].join("\n");
     await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2200);
+    setCopiedId(r.person_id);
+    setTimeout(() => setCopiedId(null), 2200);
   };
 
   if (loading) {
@@ -91,30 +87,46 @@ export default function Dashboard({ userId }) {
             hint="Já descontadas parcelas futuras e assinaturas"
           />
 
-          {/* Fatura do Pai — filete Steel Blue marca o contexto */}
-          <div
-            className="neu-out rounded-3xl p-5"
-            style={{ borderLeft: `6px solid ${COLORS.accent}` }}
-          >
-            <p className="text-xs font-semibold uppercase tracking-wide opacity-60">
-              Fatura do pai
-            </p>
-            <p
-              className="mt-2 text-2xl font-bold"
-              style={{ color: COLORS.ink }}
-            >
-              {brl(father?.father_total ?? 0)}
-            </p>
-            <button
-              onClick={copyFatherSummary}
-              disabled={!father?.items?.length}
-              className="neu-out-sm neu-btn mt-4 w-full rounded-2xl px-4 py-2 text-xs font-bold disabled:opacity-40"
-              style={{ color: COLORS.accent }}
-            >
-              {copied ? "Copiado!" : "Copiar resumo (WhatsApp)"}
-            </button>
-          </div>
+          <MetricCard
+            label="A receber"
+            value={brl(
+              receivables.reduce((s, r) => s + Number(r.total_due), 0)
+            )}
+            color={COLORS.accent}
+            hint="Gastos de terceiros ainda não acertados"
+          />
         </div>
+
+        {/* ---- A receber, por pessoa ---- */}
+        {receivables.length > 0 && (
+          <section className="mt-8">
+            <h2 className="mb-4 text-lg font-bold">A receber</h2>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              {receivables.map((r) => (
+                <div
+                  key={r.person_id}
+                  className="neu-out rounded-3xl p-5"
+                  style={{ borderLeft: `6px solid ${COLORS.accent}` }}
+                >
+                  <div className="flex items-baseline justify-between">
+                    <p className="font-semibold">{r.person_name}</p>
+                    <p className="text-lg font-bold">{brl(r.total_due)}</p>
+                  </div>
+                  <p className="mt-1 text-xs opacity-60">
+                    {r.item_count} {r.item_count === 1 ? "lançamento" : "lançamentos"}
+                  </p>
+                  <button
+                    onClick={() => copySummary(r)}
+                    className="neu-out-sm neu-btn mt-4 w-full rounded-2xl px-4 py-2 text-xs font-bold"
+                    style={{ color: COLORS.accent }}
+                  >
+                    {copiedId === r.person_id ? "Copiado!" : "Copiar resumo (WhatsApp)"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* ---- Módulo de Metas ---- */}
         {goals.length > 0 && (
@@ -187,7 +199,7 @@ export default function Dashboard({ userId }) {
           </section>
         )}
 
-        {goals.length === 0 && limits.length === 0 && (
+        {goals.length === 0 && limits.length === 0 && receivables.length === 0 && (
           <div className="neu-in mt-8 rounded-3xl p-10 text-center">
             <p className="text-lg font-semibold">Painel pronto para começar</p>
             <p className="mt-1 text-sm opacity-75">
