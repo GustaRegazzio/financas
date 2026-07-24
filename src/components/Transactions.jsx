@@ -83,6 +83,9 @@ export default function Transactions({ userId }) {
   const [loading, setLoading] = useState(true);
   const [showManual, setShowManual] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const [bulkOpen, setBulkOpen] = useState(false);
   const [importState, setImportState] = useState(null); // null | {headers, rows, map}
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
@@ -102,6 +105,18 @@ export default function Transactions({ userId }) {
     () => Object.fromEntries(categories.map((c) => [c.id, c])),
     [categories]
   );
+
+  const toggleSel = (id) =>
+    setSelected((s) => {
+      const n = new Set(s);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+
+  const exitSelection = () => {
+    setSelecting(false);
+    setSelected(new Set());
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -178,7 +193,19 @@ export default function Transactions({ userId }) {
             amount: Math.max(0, guess(["valor", "amount", "value"]))
           },
           personId: people.find((p) => p.is_owner)?.id ?? "",
-          methodId: ""
+          methodId: "",
+          /* Faturas de cartão costumam trazer compra como positivo.
+             Se a maioria das linhas for positiva, sugerimos inverter. */
+          invert: (() => {
+            const col = Math.max(0, guess(["valor", "amount", "value"]));
+            const vals = data
+              .slice(1)
+              .map((l) => parseAmount(l[col]))
+              .filter((v) => v !== null && v !== 0);
+            if (vals.length === 0) return false;
+            const pos = vals.filter((v) => v > 0).length;
+            return pos / vals.length > 0.6;
+          })()
         });
       },
       error: () => showToast("Não consegui ler esse arquivo")
@@ -187,14 +214,15 @@ export default function Transactions({ userId }) {
   };
 
   const runImport = async () => {
-    const { rows: raw, map, personId, methodId } = importState;
+    const { rows: raw, map, personId, methodId, invert } = importState;
     setBusy(true);
     let ok = 0, dup = 0, bad = 0;
 
     for (const line of raw) {
       const occurred_on = parseDate(line[map.date]);
       const description = String(line[map.desc] ?? "").trim();
-      const amount = parseAmount(line[map.amount]);
+      let amount = parseAmount(line[map.amount]);
+      if (amount !== null && invert) amount = -amount;
       if (!occurred_on || !description || amount === null) {
         bad++;
         continue;
@@ -247,6 +275,13 @@ export default function Transactions({ userId }) {
         <header className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <h1 className="text-2xl font-bold md:text-3xl">Transações</h1>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => (selecting ? exitSelection() : setSelecting(true))}
+              className="neu-out-sm neu-btn rounded-2xl px-4 py-2 text-sm font-semibold"
+              style={{ color: selecting ? COLORS.danger : COLORS.ink }}
+            >
+              {selecting ? "Cancelar" : "Selecionar"}
+            </button>
             <button
               onClick={() => fileRef.current?.click()}
               className="neu-out-sm neu-btn rounded-2xl px-4 py-2 text-sm font-semibold"
@@ -329,6 +364,39 @@ export default function Transactions({ userId }) {
           />
         </div>
 
+        {/* Barra de seleção em lote */}
+        {selecting && (
+          <div className="neu-in mb-5 flex flex-col gap-3 rounded-3xl px-5 py-4 md:flex-row md:items-center md:justify-between">
+            <label className="flex cursor-pointer items-center gap-3 text-sm font-medium">
+              <input
+                type="checkbox"
+                checked={rows.length > 0 && selected.size === rows.length}
+                onChange={(e) =>
+                  setSelected(
+                    e.target.checked ? new Set(rows.map((r) => r.id)) : new Set()
+                  )
+                }
+                className="h-5 w-5"
+                style={{ accentColor: COLORS.danger }}
+              />
+              {selected.size === 0
+                ? "Selecionar todas do período"
+                : `${selected.size} selecionada${selected.size > 1 ? "s" : ""}`}
+            </label>
+            <button
+              onClick={() => setBulkOpen(true)}
+              disabled={selected.size === 0}
+              className="neu-btn rounded-2xl px-6 py-3 text-sm font-bold text-white disabled:opacity-40"
+              style={{
+                background: COLORS.danger,
+                boxShadow: `-4px -4px 12px rgba(255,255,255,0.7), 4px 4px 12px ${COLORS.shadowDark}`
+              }}
+            >
+              Editar selecionadas
+            </button>
+          </div>
+        )}
+
         {/* Lista */}
         {loading ? (
           <p className="py-8 text-center text-sm opacity-70">Carregando…</p>
@@ -354,10 +422,21 @@ export default function Transactions({ userId }) {
                 methods.find((m) => m.id === t.payment_method_id)?.name ?? null;
               const isThirdParty = Boolean(person && !person.is_owner);
               return (
-                <li key={t.id}>
+                <li key={t.id} className="flex items-center gap-3">
+                  {selecting && (
+                    <input
+                      type="checkbox"
+                      checked={selected.has(t.id)}
+                      onChange={() => toggleSel(t.id)}
+                      className="h-5 w-5 shrink-0"
+                      style={{ accentColor: COLORS.danger }}
+                    />
+                  )}
                   <button
-                    onClick={() => setEditing(t)}
-                    className="neu-out neu-btn w-full rounded-3xl px-4 py-3 text-left md:px-5"
+                    onClick={() =>
+                      selecting ? toggleSel(t.id) : setEditing(t)
+                    }
+                    className="neu-out neu-btn min-w-0 flex-1 rounded-3xl px-4 py-3 text-left md:px-5"
                     style={{
                       ...(isThirdParty
                         ? { borderLeft: `6px solid ${COLORS.accent}` }
@@ -509,13 +588,36 @@ export default function Transactions({ userId }) {
                 </select>
               </label>
 
+              <label className="neu-in flex cursor-pointer items-start gap-3 rounded-2xl px-4 py-3 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  checked={importState.invert}
+                  onChange={(e) =>
+                    setImportState((s) => ({ ...s, invert: e.target.checked }))
+                  }
+                  className="mt-0.5 h-4 w-4"
+                  style={{ accentColor: COLORS.danger }}
+                />
+                <span>
+                  Inverter sinal dos valores
+                  <span className="mt-0.5 block text-xs font-normal opacity-70">
+                    Faturas de cartão lançam compra como positivo. Confira no
+                    preview: gasto tem que aparecer negativo.
+                  </span>
+                </span>
+              </label>
+
               {/* Preview das 3 primeiras linhas interpretadas */}
               <div className="neu-in rounded-2xl p-3 text-xs">
                 {importState.rows.slice(0, 3).map((line, i) => (
                   <p key={i} className="truncate py-0.5">
                     {parseDate(line[importState.map.date]) ?? "data?"} ·{" "}
                     {String(line[importState.map.desc] ?? "descrição?")} ·{" "}
-                    {parseAmount(line[importState.map.amount]) ?? "valor?"}
+                    {(() => {
+                      const v = parseAmount(line[importState.map.amount]);
+                      if (v === null) return "valor?";
+                      return brl(importState.invert ? -v : v);
+                    })()}
                   </p>
                 ))}
               </div>
@@ -535,6 +637,24 @@ export default function Transactions({ userId }) {
           </Modal>
         )}
 
+        {/* Modal: edição em lote */}
+        {bulkOpen && (
+          <BulkEdit
+            count={selected.size}
+            categories={categories}
+            people={people}
+            methods={methods}
+            rows={rows.filter((r) => selected.has(r.id))}
+            onClose={() => setBulkOpen(false)}
+            onDone={(msg) => {
+              setBulkOpen(false);
+              exitSelection();
+              showToast(msg);
+              load();
+            }}
+          />
+        )}
+
         {toast && (
           <div
             role="status"
@@ -546,6 +666,203 @@ export default function Transactions({ userId }) {
         )}
       </div>
     </div>
+  );
+}
+
+/* ---------- Edição em lote ---------- */
+function BulkEdit({ count, categories, people, methods, rows, onClose, onDone }) {
+  const [sign, setSign] = useState("keep"); // keep | out | in | invert
+  const [categoryId, setCategoryId] = useState("");
+  const [personId, setPersonId] = useState("");
+  const [methodId, setMethodId] = useState("");
+  const [paidBack, setPaidBack] = useState("keep"); // keep | yes | no
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const apply = async () => {
+    setBusy(true);
+    setError(null);
+    const common = {};
+    if (categoryId) common.category_id = categoryId;
+    if (personId) common.person_id = personId;
+    if (methodId) common.payment_method_id = methodId;
+    if (paidBack !== "keep") common.is_paid_back = paidBack === "yes";
+
+    let failed = 0;
+    for (const r of rows) {
+      const patch = { ...common };
+      if (sign === "out") patch.amount = -Math.abs(r.amount);
+      if (sign === "in") patch.amount = Math.abs(r.amount);
+      if (sign === "invert") patch.amount = -r.amount;
+      if (Object.keys(patch).length === 0) continue;
+      const { error: err } = await supabase
+        .from("transactions")
+        .update(patch)
+        .eq("id", r.id);
+      if (err) failed++;
+    }
+    setBusy(false);
+    if (failed > 0) {
+      setError(`${failed} de ${rows.length} não puderam ser alteradas.`);
+      return;
+    }
+    onDone(`${rows.length} transações atualizadas`);
+  };
+
+  const removeAll = async () => {
+    setBusy(true);
+    const { error: err } = await supabase
+      .from("transactions")
+      .delete()
+      .in("id", rows.map((r) => r.id));
+    setBusy(false);
+    if (err) {
+      setError("Não consegui excluir. Tente de novo.");
+      return;
+    }
+    onDone(`${rows.length} transações excluídas`);
+  };
+
+  return (
+    <Modal onClose={() => !busy && onClose()}>
+      <h2 className="text-lg font-bold">Editar {count} transações</h2>
+      <p className="mt-1 text-sm opacity-75">
+        Campos deixados em "manter" não são alterados.
+      </p>
+
+      <div className="mt-4 flex flex-col gap-3">
+        <Field label="Tipo do valor">
+          <select
+            value={sign}
+            onChange={(e) => setSign(e.target.value)}
+            className="neu-select w-full rounded-2xl px-3 py-3 text-sm"
+            style={{ color: COLORS.ink }}
+          >
+            <option value="keep">Manter como está</option>
+            <option value="out">Transformar em despesa</option>
+            <option value="in">Transformar em entrada</option>
+            <option value="invert">Inverter o sinal</option>
+          </select>
+        </Field>
+
+        <Field label="Categoria">
+          <select
+            value={categoryId}
+            onChange={(e) => setCategoryId(e.target.value)}
+            className="neu-select w-full rounded-2xl px-3 py-3 text-sm"
+            style={{ color: COLORS.ink }}
+          >
+            <option value="">Manter</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        </Field>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Pessoa">
+            <select
+              value={personId}
+              onChange={(e) => setPersonId(e.target.value)}
+              className="neu-select w-full rounded-2xl px-3 py-3 text-sm"
+              style={{ color: COLORS.ink }}
+            >
+              <option value="">Manter</option>
+              {people.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Cartão / Pix">
+            <select
+              value={methodId}
+              onChange={(e) => setMethodId(e.target.value)}
+              className="neu-select w-full rounded-2xl px-3 py-3 text-sm"
+              style={{ color: COLORS.ink }}
+            >
+              <option value="">Manter</option>
+              {methods.map((m) => (
+                <option key={m.id} value={m.id}>{m.name}</option>
+              ))}
+            </select>
+          </Field>
+        </div>
+
+        <Field label="Acerto de terceiros">
+          <select
+            value={paidBack}
+            onChange={(e) => setPaidBack(e.target.value)}
+            className="neu-select w-full rounded-2xl px-3 py-3 text-sm"
+            style={{ color: COLORS.ink }}
+          >
+            <option value="keep">Manter</option>
+            <option value="yes">Marcar como acertado</option>
+            <option value="no">Marcar como a receber</option>
+          </select>
+        </Field>
+
+        {error && (
+          <p className="text-xs font-semibold" style={{ color: COLORS.danger }}>
+            {error}
+          </p>
+        )}
+
+        <button
+          onClick={apply}
+          disabled={busy}
+          className="neu-btn rounded-2xl px-6 py-3 text-sm font-bold text-white disabled:opacity-50"
+          style={{
+            background: COLORS.danger,
+            boxShadow: `-4px -4px 12px rgba(255,255,255,0.7), 4px 4px 12px ${COLORS.shadowDark}`
+          }}
+        >
+          {busy ? "Aplicando…" : `Aplicar a ${count}`}
+        </button>
+
+        {confirmDelete ? (
+          <div className="neu-in rounded-2xl p-4">
+            <p className="text-sm font-semibold">Excluir as {count} selecionadas?</p>
+            <p className="mt-1 text-xs opacity-70">Não dá para desfazer.</p>
+            <div className="mt-3 flex gap-2">
+              <button
+                onClick={removeAll}
+                disabled={busy}
+                className="neu-btn flex-1 rounded-2xl px-4 py-2 text-xs font-bold text-white"
+                style={{ background: COLORS.dangerDeep }}
+              >
+                Excluir
+              </button>
+              <button
+                onClick={() => setConfirmDelete(false)}
+                className="neu-out-sm neu-btn flex-1 rounded-2xl px-4 py-2 text-xs font-bold"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={() => setConfirmDelete(true)}
+            className="neu-out-sm neu-btn rounded-2xl px-6 py-2 text-xs font-semibold"
+            style={{ color: COLORS.dangerDeep }}
+          >
+            Excluir selecionadas
+          </button>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-xs font-semibold uppercase tracking-wide opacity-60">
+        {label}
+      </span>
+      {children}
+    </label>
   );
 }
 
