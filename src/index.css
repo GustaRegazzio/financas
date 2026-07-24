@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---- Design System: Flat + Neumorphism / base off-white ---- */
+.neu-out {
+  background: var(--bg);
+  box-shadow: -6px -6px 18px rgba(255, 255, 255, 0.9),
+               6px  6px 18px var(--shadow-dark);
+}
+.neu-out-sm {
+  background: var(--bg);
+  box-shadow: -3px -3px 10px rgba(255, 255, 255, 0.9),
+               3px  3px 10px var(--shadow-dark);
+}
+.neu-in {
+  background: var(--surface);
+  box-shadow: inset -4px -4px 12px rgba(255, 255, 255, 0.85),
+              inset  4px  4px 12px var(--shadow-dark);
+}
+.neu-btn { transition: box-shadow 0.15s ease, transform 0.1s ease; }
+.neu-btn:hover { transform: translateY(-1px); }
+.neu-btn:active {
+  box-shadow: inset -3px -3px 10px rgba(255, 255, 255, 0.85),
+              inset  3px  3px 10px var(--shadow-dark);
+  transform: translateY(0);
+}
+.neu-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+select.neu-select, input.neu-input {
+  appearance: none;
+  background: var(--surface);
+  box-shadow: inset -3px -3px 9px rgba(255, 255, 255, 0.85),
+              inset  3px  3px 9px var(--shadow-dark);
+}
+input.neu-input:focus, select.neu-select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .neu-btn, .neu-btn:hover { transition: none; transform: none; }
+}
