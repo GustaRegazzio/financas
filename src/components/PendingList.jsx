@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { supabase } from "../lib/supabase";
 import { COLORS, NATURE_COLOR, brl } from "../lib/theme";
+import TransactionForm from "./TransactionForm.jsx";
 
 /* ============================================================
    Lista de Pendências — Human-in-the-Loop (Supabase)
@@ -25,7 +26,10 @@ const addMonths = (iso, n) => {
 export default function PendingList({ userId }) {
   const [pending, setPending] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [people, setPeople] = useState([]);
+  const [methods, setMethods] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [undoStack, setUndoStack] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
@@ -46,16 +50,20 @@ export default function PendingList({ userId }) {
   /* ---------- Carga inicial ---------- */
   const load = useCallback(async () => {
     setLoading(true);
-    const [tx, cats] = await Promise.all([
+    const [tx, cats, ppl, pm] = await Promise.all([
       supabase
         .from("transactions")
         .select("*")
         .eq("status", "pending")
         .order("occurred_on", { ascending: true }),
-      supabase.from("categories").select("*").order("name")
+      supabase.from("categories").select("*").order("name"),
+      supabase.from("people").select("*").eq("active", true).order("is_owner", { ascending: false }),
+      supabase.from("payment_methods").select("*").eq("active", true).order("name")
     ]);
     if (!tx.error) setPending(tx.data ?? []);
     if (!cats.error) setCategories(cats.data ?? []);
+    if (!ppl.error) setPeople(ppl.data ?? []);
+    if (!pm.error) setMethods(pm.data ?? []);
     setLoading(false);
   }, []);
 
@@ -329,7 +337,8 @@ export default function PendingList({ userId }) {
             const dotColor = cat
               ? NATURE_COLOR[cat.nature]
               : COLORS.surface;
-            const isFather = t.context === "father";
+            const person = people.find((p) => p.id === t.person_id);
+            const isFather = Boolean(person && !person.is_owner);
             return (
               <li
                 key={t.id}
@@ -353,7 +362,9 @@ export default function PendingList({ userId }) {
                     />
                     <div className="min-w-0">
                       <p className="truncate text-sm font-semibold md:text-base">
-                        {t.description}
+                        {t.expense_type
+                          ? `${t.expense_type}${t.note ? ` — ${t.note}` : ""}`
+                          : t.description}
                       </p>
                       <p className="mt-0.5 text-xs opacity-70">
                         {shortDate(t.occurred_on)}
@@ -398,6 +409,14 @@ export default function PendingList({ userId }) {
                     </select>
 
                     <button
+                      onClick={() => setEditing(t)}
+                      className="neu-out-sm neu-btn rounded-2xl px-3 py-2 text-xs font-semibold md:text-sm"
+                      style={{ color: COLORS.accent }}
+                    >
+                      Editar
+                    </button>
+
+                    <button
                       onClick={() => approve([t.id])}
                       className="neu-out-sm neu-btn rounded-2xl px-4 py-2 text-xs font-bold md:text-sm"
                       style={{ color: COLORS.danger }}
@@ -418,6 +437,22 @@ export default function PendingList({ userId }) {
               Importe transações para revisar. Ctrl+Z desfaz a última aprovação.
             </p>
           </div>
+        )}
+
+        {editing && (
+          <TransactionForm
+            userId={userId}
+            transaction={editing}
+            categories={categories}
+            people={people}
+            methods={methods}
+            onClose={() => setEditing(null)}
+            onSaved={() => {
+              setEditing(null);
+              showToast("Transação atualizada");
+              load();
+            }}
+          />
         )}
 
         {toast && (
