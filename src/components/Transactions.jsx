@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Papa from "papaparse";
 import { supabase } from "../lib/supabase";
 import { COLORS, NATURE_COLOR, brl } from "../lib/theme";
+import TransactionForm, { Modal, parseAmount } from "./TransactionForm.jsx";
 
 /* ============================================================
    Transações — histórico, visões por período, lançamento
@@ -57,19 +58,6 @@ const periodLabel = (mode, start, end) => {
   return f(start, { month: "long", year: "numeric" });
 };
 
-/* Converte "1.234,56" / "-45.9" / "R$ 12,00" em número JS */
-const parseAmount = (raw) => {
-  if (typeof raw === "number") return raw;
-  let s = String(raw).replace(/[^\d,.\-]/g, "");
-  if (s.includes(",") && s.lastIndexOf(",") > s.lastIndexOf(".")) {
-    s = s.replace(/\./g, "").replace(",", ".");
-  } else {
-    s = s.replace(/,/g, "");
-  }
-  const n = parseFloat(s);
-  return Number.isFinite(n) ? n : null;
-};
-
 /* Converte dd/mm/aaaa ou aaaa-mm-dd em ISO */
 const parseDate = (raw) => {
   const s = String(raw).trim();
@@ -90,8 +78,11 @@ export default function Transactions({ userId }) {
   const [anchor, setAnchor] = useState(new Date());
   const [rows, setRows] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [people, setPeople] = useState([]);
+  const [methods, setMethods] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showManual, setShowManual] = useState(false);
+  const [editing, setEditing] = useState(null);
   const [importState, setImportState] = useState(null); // null | {headers, rows, map}
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
@@ -114,17 +105,21 @@ export default function Transactions({ userId }) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [tx, cats] = await Promise.all([
+    const [tx, cats, ppl, pm] = await Promise.all([
       supabase
         .from("transactions")
         .select("*")
         .gte("occurred_on", toISO(start))
         .lte("occurred_on", toISO(end))
         .order("occurred_on", { ascending: false }),
-      supabase.from("categories").select("*").order("name")
+      supabase.from("categories").select("*").order("name"),
+      supabase.from("people").select("*").eq("active", true).order("is_owner", { ascending: false }),
+      supabase.from("payment_methods").select("*").eq("active", true).order("name")
     ]);
     if (!tx.error) setRows(tx.data ?? []);
     if (!cats.error) setCategories(cats.data ?? []);
+    if (!ppl.error) setPeople(ppl.data ?? []);
+    if (!pm.error) setMethods(pm.data ?? []);
     setLoading(false);
   }, [start, end]);
 
@@ -132,9 +127,20 @@ export default function Transactions({ userId }) {
     load();
   }, [load]);
 
+  const ownerId = useMemo(
+    () => people.find((p) => p.is_owner)?.id,
+    [people]
+  );
+
   const totals = useMemo(() => {
+    const excluded = new Set(
+      categories.filter((c) => c.exclude_from_metrics).map((c) => c.id)
+    );
     const personal = rows.filter(
-      (r) => r.context === "personal" && r.status === "confirmed"
+      (r) =>
+        r.status === "confirmed" &&
+        (r.person_id ?? ownerId) === ownerId &&
+        !excluded.has(r.category_id)
     );
     const out = personal
       .filter((r) => r.amount < 0)
@@ -143,7 +149,7 @@ export default function Transactions({ userId }) {
       .filter((r) => r.amount > 0)
       .reduce((s, r) => s + r.amount, 0);
     return { out, inc, net: inc - out };
-  }, [rows]);
+  }, [rows, categories, ownerId]);
 
   /* ---------- Import CSV ---------- */
   const onFile = (e) => {
@@ -171,7 +177,8 @@ export default function Transactions({ userId }) {
             desc: Math.max(0, guess(["desc", "hist", "lanç", "lanc", "title"])),
             amount: Math.max(0, guess(["valor", "amount", "value"]))
           },
-          context: "personal"
+          personId: people.find((p) => p.is_owner)?.id ?? "",
+          methodId: ""
         });
       },
       error: () => showToast("Não consegui ler esse arquivo")
@@ -180,7 +187,7 @@ export default function Transactions({ userId }) {
   };
 
   const runImport = async () => {
-    const { headers, rows: raw, map, context } = importState;
+    const { rows: raw, map, personId, methodId } = importState;
     setBusy(true);
     let ok = 0, dup = 0, bad = 0;
 
@@ -209,7 +216,10 @@ export default function Transactions({ userId }) {
         description,
         amount,
         status: "pending",
-        context: sug?.[0]?.set_context ?? context,
+        person_id: personId || null,
+        payment_method_id: methodId || null,
+        expense_type: "Compra",
+        note: description,
         suggested_category_id: suggested,
         suggestion_score: score,
         installment_num: inst ? parseInt(inst[1], 10) : null,
@@ -338,18 +348,23 @@ export default function Transactions({ userId }) {
                   ? catById[t.suggested_category_id]
                   : null;
               const dotColor = cat ? NATURE_COLOR[cat.nature] : COLORS.surface;
-              const isFather = t.context === "father";
+              const person = people.find((p) => p.id === t.person_id);
+              const personName = person && !person.is_owner ? person.name : null;
+              const methodName =
+                methods.find((m) => m.id === t.payment_method_id)?.name ?? null;
+              const isThirdParty = Boolean(person && !person.is_owner);
               return (
-                <li
-                  key={t.id}
-                  className="neu-out rounded-3xl px-4 py-3 md:px-5"
-                  style={{
-                    ...(isFather
-                      ? { borderLeft: `6px solid ${COLORS.accent}` }
-                      : {}),
-                    ...(t.status === "pending" ? { opacity: 0.65 } : {})
-                  }}
-                >
+                <li key={t.id}>
+                  <button
+                    onClick={() => setEditing(t)}
+                    className="neu-out neu-btn w-full rounded-3xl px-4 py-3 text-left md:px-5"
+                    style={{
+                      ...(isThirdParty
+                        ? { borderLeft: `6px solid ${COLORS.accent}` }
+                        : {}),
+                      ...(t.status === "pending" ? { opacity: 0.65 } : {})
+                    }}
+                  >
                   <div className="flex items-center gap-3">
                     <span
                       aria-hidden
@@ -358,11 +373,18 @@ export default function Transactions({ userId }) {
                     />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-semibold">
-                        {t.description}
+                        {t.expense_type
+                          ? `${t.expense_type}${t.note ? ` — ${t.note}` : ""}`
+                          : t.description}
                       </p>
                       <p className="mt-0.5 text-xs opacity-70">
                         {new Date(t.occurred_on + "T12:00:00").toLocaleDateString("pt-BR")}
                         {cat && <> · {cat.name}</>}
+                        {personName && <> · {personName}</>}
+                        {methodName && <> · {methodName}</>}
+                        {isThirdParty && (
+                          <> · {t.is_paid_back ? "acertado" : "a receber"}</>
+                        )}
                         {t.status === "pending" && <> · aguardando aprovação</>}
                         {t.installment_num && (
                           <span
@@ -383,21 +405,42 @@ export default function Transactions({ userId }) {
                       {brl(t.amount)}
                     </span>
                   </div>
+                  </button>
                 </li>
               );
             })}
           </ul>
         )}
 
-        {/* Modal: lançamento manual */}
+        {/* Modal: nova transação */}
         {showManual && (
-          <ManualEntry
+          <TransactionForm
             userId={userId}
+            transaction={null}
             categories={categories}
+            people={people}
+            methods={methods}
             onClose={() => setShowManual(false)}
             onSaved={() => {
               setShowManual(false);
               showToast("Lançada — aprove na aba Pendências");
+              load();
+            }}
+          />
+        )}
+
+        {/* Modal: editar transação existente */}
+        {editing && (
+          <TransactionForm
+            userId={userId}
+            transaction={editing}
+            categories={categories}
+            people={people}
+            methods={methods}
+            onClose={() => setEditing(null)}
+            onSaved={() => {
+              setEditing(null);
+              showToast("Transação atualizada");
               load();
             }}
           />
@@ -435,17 +478,34 @@ export default function Transactions({ userId }) {
                 )
               )}
               <label className="flex items-center justify-between gap-3 text-sm font-medium">
-                Contexto
+                Pessoa
                 <select
-                  value={importState.context}
+                  value={importState.personId}
                   onChange={(e) =>
-                    setImportState((s) => ({ ...s, context: e.target.value }))
+                    setImportState((s) => ({ ...s, personId: e.target.value }))
                   }
                   className="neu-select rounded-2xl px-3 py-2 text-sm"
                   style={{ color: COLORS.ink }}
                 >
-                  <option value="personal">Pessoal</option>
-                  <option value="father">Fatura do pai</option>
+                  {people.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center justify-between gap-3 text-sm font-medium">
+                Cartão / Pix
+                <select
+                  value={importState.methodId}
+                  onChange={(e) =>
+                    setImportState((s) => ({ ...s, methodId: e.target.value }))
+                  }
+                  className="neu-select rounded-2xl px-3 py-2 text-sm"
+                  style={{ color: COLORS.ink }}
+                >
+                  <option value="">Não informado</option>
+                  {methods.map((m) => (
+                    <option key={m.id} value={m.id}>{m.name}</option>
+                  ))}
                 </select>
               </label>
 
@@ -484,174 +544,6 @@ export default function Transactions({ userId }) {
             {toast}
           </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-/* ---------- Lançamento manual ---------- */
-function ManualEntry({ userId, categories, onClose, onSaved }) {
-  const [form, setForm] = useState({
-    occurred_on: toISO(new Date()),
-    description: "",
-    amount: "",
-    kind: "out", // out | in
-    context: "personal",
-    category_id: "",
-    installment_total: ""
-  });
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-
-  const save = async () => {
-    const amount = parseAmount(form.amount);
-    if (!form.description.trim() || amount === null || amount === 0) {
-      setError("Preencha descrição e um valor válido.");
-      return;
-    }
-    setSaving(true);
-    const total = parseInt(form.installment_total, 10);
-    const hasInstallments = Number.isFinite(total) && total > 1;
-    const signed = form.kind === "out" ? -Math.abs(amount) : Math.abs(amount);
-    const { error: err } = await supabase.from("transactions").insert({
-      user_id: userId,
-      occurred_on: form.occurred_on,
-      description: hasInstallments
-        ? `${form.description.trim()} 01/${String(total).padStart(2, "0")}`
-        : form.description.trim(),
-      amount: signed,
-      status: "pending",
-      context: form.context,
-      suggested_category_id: form.category_id || null,
-      installment_num: hasInstallments ? 1 : null,
-      installment_total: hasInstallments ? total : null
-    });
-    setSaving(false);
-    if (err) {
-      setError(
-        err.code === "23505"
-          ? "Já existe uma transação idêntica nessa data."
-          : "Erro ao salvar. Tente de novo."
-      );
-      return;
-    }
-    onSaved();
-  };
-
-  return (
-    <Modal onClose={() => !saving && onClose()}>
-      <h2 className="text-lg font-bold">Nova transação</h2>
-      <div className="mt-4 flex flex-col gap-3">
-        <div className="flex gap-2">
-          {[["out", "Despesa"], ["in", "Entrada"]].map(([k, label]) => (
-            <button
-              key={k}
-              onClick={() => setForm((f) => ({ ...f, kind: k }))}
-              className={`${form.kind === k ? "neu-in" : "neu-out-sm neu-btn"} flex-1 rounded-2xl px-4 py-2 text-sm font-bold`}
-              style={{
-                color:
-                  form.kind === k
-                    ? k === "out"
-                      ? COLORS.danger
-                      : COLORS.accent
-                    : COLORS.ink
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <input
-          type="date"
-          value={form.occurred_on}
-          onChange={set("occurred_on")}
-          className="neu-input rounded-2xl px-4 py-3 text-sm"
-          style={{ color: COLORS.ink }}
-        />
-        <input
-          type="text"
-          placeholder="Descrição"
-          value={form.description}
-          onChange={set("description")}
-          className="neu-input rounded-2xl px-4 py-3 text-sm"
-          style={{ color: COLORS.ink }}
-        />
-        <input
-          type="text"
-          inputMode="decimal"
-          placeholder="Valor (ex.: 45,90)"
-          value={form.amount}
-          onChange={set("amount")}
-          className="neu-input rounded-2xl px-4 py-3 text-sm"
-          style={{ color: COLORS.ink }}
-        />
-        <div className="grid grid-cols-2 gap-3">
-          <select
-            value={form.category_id}
-            onChange={set("category_id")}
-            className="neu-select rounded-2xl px-3 py-3 text-sm"
-            style={{ color: COLORS.ink }}
-          >
-            <option value="">Sem categoria</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
-          <select
-            value={form.context}
-            onChange={set("context")}
-            className="neu-select rounded-2xl px-3 py-3 text-sm"
-            style={{ color: COLORS.ink }}
-          >
-            <option value="personal">Pessoal</option>
-            <option value="father">Fatura do pai</option>
-          </select>
-        </div>
-        <input
-          type="number"
-          min="2"
-          max="99"
-          placeholder="Parcelas (deixe vazio se à vista)"
-          value={form.installment_total}
-          onChange={set("installment_total")}
-          className="neu-input rounded-2xl px-4 py-3 text-sm"
-          style={{ color: COLORS.ink }}
-        />
-        {error && (
-          <p className="text-xs font-semibold" style={{ color: COLORS.danger }}>
-            {error}
-          </p>
-        )}
-        <button
-          onClick={save}
-          disabled={saving}
-          className="neu-btn rounded-2xl px-6 py-3 text-sm font-bold text-white disabled:opacity-50"
-          style={{
-            background: COLORS.danger,
-            boxShadow: `-4px -4px 12px rgba(255,255,255,0.7), 4px 4px 12px ${COLORS.shadowDark}`
-          }}
-        >
-          {saving ? "Salvando…" : "Salvar"}
-        </button>
-      </div>
-    </Modal>
-  );
-}
-
-/* ---------- Modal genérico ---------- */
-function Modal({ children, onClose }) {
-  return (
-    <div
-      className="fixed inset-0 z-40 flex items-end justify-center bg-black/20 p-4 md:items-center"
-      onClick={onClose}
-    >
-      <div
-        className="neu-out max-h-[85vh] w-full max-w-md overflow-y-auto rounded-3xl p-6"
-        style={{ background: COLORS.bg, color: COLORS.ink }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {children}
       </div>
     </div>
   );
