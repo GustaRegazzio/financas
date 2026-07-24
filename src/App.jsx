@@ -3,11 +3,12 @@ import { supabase } from "./lib/supabase";
 import { COLORS, cssVars } from "./lib/theme";
 import Dashboard from "./components/Dashboard.jsx";
 import PendingList from "./components/PendingList.jsx";
+import Transactions from "./components/Transactions.jsx";
 
 export default function App() {
   const [session, setSession] = useState(null);
   const [checking, setChecking] = useState(true);
-  const [view, setView] = useState("dashboard"); // 'dashboard' | 'pending'
+  const [view, setView] = useState("dashboard"); // 'dashboard' | 'pending' | 'transactions'
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -45,6 +46,12 @@ export default function App() {
         <TabButton active={view === "pending"} onClick={() => setView("pending")}>
           Pendências
         </TabButton>
+        <TabButton
+          active={view === "transactions"}
+          onClick={() => setView("transactions")}
+        >
+          Transações
+        </TabButton>
         <button
           onClick={() => supabase.auth.signOut()}
           className="neu-out-sm neu-btn ml-auto rounded-2xl px-4 py-2 text-xs font-semibold"
@@ -54,11 +61,9 @@ export default function App() {
         </button>
       </nav>
 
-      {view === "dashboard" ? (
-        <Dashboard userId={session.user.id} />
-      ) : (
-        <PendingList userId={session.user.id} />
-      )}
+      {view === "dashboard" && <Dashboard userId={session.user.id} />}
+      {view === "pending" && <PendingList userId={session.user.id} />}
+      {view === "transactions" && <Transactions userId={session.user.id} />}
     </div>
   );
 }
