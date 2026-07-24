@@ -43,8 +43,14 @@ export default function TransactionForm({
 
   const [form, setForm] = useState(() => ({
     occurred_on: transaction?.occurred_on ?? toISO(new Date()),
-    expense_type: transaction?.expense_type ?? "Compra",
-    note: transaction?.note ?? "",
+    /* Em transação nova, "Compra" é um padrão útil. Em edição, nunca
+       inventamos: mostramos exatamente o que está gravado. */
+    expense_type: isEdit ? (transaction.expense_type ?? "") : "Compra",
+    /* Importadas do CSV não têm anotação — o texto do extrato está na
+       descrição. Trazemos ele para o campo em vez de deixar vazio. */
+    note: isEdit
+      ? (transaction.note ?? transaction.description ?? "")
+      : "",
     description: transaction?.description ?? "",
     amount:
       transaction != null
@@ -77,13 +83,22 @@ export default function TransactionForm({
   const hasGroup =
     isEdit && transaction.installment_group_id && transaction.installment_total > 1;
 
-  /* A descrição é o que o motor de regras e o anti-duplicação usam.
-     Montamos a partir do tipo + anotação para manter padronização. */
+  /* A descrição é o que o motor de regras e o anti-duplicação usam,
+     então ela só muda se o usuário realmente mexeu em tipo ou anotação.
+     Caso contrário, preservamos o texto original (ex.: o do extrato). */
   const buildDescription = () => {
+    if (isEdit) {
+      const typeUnchanged =
+        (form.expense_type?.trim() || "") === (transaction.expense_type ?? "");
+      const noteUnchanged =
+        (form.note?.trim() || "") ===
+        (transaction.note ?? transaction.description ?? "");
+      if (typeUnchanged && noteUnchanged) return transaction.description;
+    }
     const base = [form.expense_type?.trim(), form.note?.trim()]
       .filter(Boolean)
       .join(" — ");
-    return base || form.description || "Sem descrição";
+    return base || transaction?.description || "Sem descrição";
   };
 
   const save = async () => {
@@ -92,7 +107,7 @@ export default function TransactionForm({
       setError("Informe um valor válido.");
       return;
     }
-    if (!form.expense_type?.trim() && !form.note?.trim()) {
+    if (!isEdit && !form.expense_type?.trim() && !form.note?.trim()) {
       setError("Preencha ao menos o tipo ou a anotação.");
       return;
     }
@@ -222,7 +237,7 @@ export default function TransactionForm({
           <input
             type="text"
             list="expense-types"
-            placeholder="Compra, Uber, Rolê…"
+            placeholder={isEdit ? "Sem tipo definido" : "Compra, Uber, Rolê…"}
             value={form.expense_type}
             onChange={set("expense_type")}
             className="neu-input w-full rounded-2xl px-4 py-3 text-sm"
